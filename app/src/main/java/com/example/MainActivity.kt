@@ -27,7 +27,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -77,7 +76,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -108,7 +106,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
-import android.speech.tts.TextToSpeech
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
@@ -144,10 +141,6 @@ import androidx.compose.ui.draw.drawWithContent
 import kotlin.math.roundToInt
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.ui.zIndex
-import android.media.MediaPlayer
-
 
 // Imports for custom bottom sheets and widgets
 import androidx.compose.material3.ModalBottomSheet
@@ -1247,10 +1240,7 @@ class PdfWebViewState {
 class AndroidBridge(
     private val onPageChanged: (page: Int, total: Int) -> Unit,
     private val onSearchMatchesCount: (current: Int, total: Int) -> Unit,
-    private val onSearchStateChanged: (state: Int, previous: Boolean) -> Unit,
-    private val onLinkClicked: (url: String, text: String) -> Unit = { _, _ -> },
-    private val onUserScrolled: () -> Unit = {},
-    private val onScrollProgress: (fraction: Float) -> Unit = {}
+    private val onSearchStateChanged: (state: Int, previous: Boolean) -> Unit
 ) {
     private val handler = Handler(Looper.getMainLooper())
 
@@ -1277,39 +1267,7 @@ class AndroidBridge(
             onSearchStateChanged(state, previous)
         }
     }
-
-    @JavascriptInterface
-    fun onLinkClicked(url: String, text: String) {
-        android.util.Log.d("PDF_BRIDGE", "onLinkClicked called: url=$url, text=$text")
-        handler.post {
-            onLinkClicked(url, text)
-        }
-    }
-
-    @JavascriptInterface
-    fun onUserScrolled() {
-        handler.post {
-            onUserScrolled()
-        }
-    }
-
-    @JavascriptInterface
-    fun onScrollProgress(fraction: Double) {
-        handler.post {
-            onScrollProgress(fraction.toFloat())
-        }
-    }
 }
-
-enum class AudioPlayState {
-    IDLE,
-    BUFFERING,
-    PLAYING,
-    PAUSED,
-    COMPLETED,
-    ERROR
-}
-
 
 enum class ReaderBottomSheetType {
     ZOOM_DISPLAY,
@@ -2223,27 +2181,6 @@ fun PdfReaderScreen(
     var totalPages by remember(pdf) { mutableStateOf(getPdfPageCount(pdf.cachedFilePath)) }
     val webViewState = remember { PdfWebViewState() }
 
-    var audioPlayUrl by remember { mutableStateOf<String?>(null) }
-    var audioOriginalUrl by remember { mutableStateOf<String?>(null) }
-    var audioWord by remember { mutableStateOf("") }
-    var showMiniPlayer by remember { mutableStateOf(false) }
-    var inAppBrowserUrl by remember { mutableStateOf<String?>(null) }
-
-    var isScrollerVisible by remember { mutableStateOf(false) }
-    var isDraggingScroller by remember { mutableStateOf(false) }
-    var scrollTrigger by remember { mutableStateOf(0) }
-    var scrollProgress by remember { mutableStateOf(0f) }
-
-    LaunchedEffect(currentPage, isDraggingScroller, scrollTrigger) {
-        if (isDraggingScroller) {
-            isScrollerVisible = true
-        } else {
-            isScrollerVisible = true
-            kotlinx.coroutines.delay(3000)
-            isScrollerVisible = false
-        }
-    }
-
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var searchCurrentMatch by remember { mutableStateOf(0) }
@@ -2375,36 +2312,6 @@ fun PdfReaderScreen(
                         searchTotalMatches = 0
                     }
                 },
-                onLinkClicked = { url, text ->
-                    val resolvedUrl = resolveAbsoluteUrl(url)
-                    android.util.Log.d("PDF_LINK_CLICK", "URL clicked: $url -> Resolved: $resolvedUrl, Text: $text")
-                    if (isDirectAudioUrl(resolvedUrl)) {
-                        val extractedWord = extractWordFromAudioUrl(resolvedUrl, text)
-                        android.widget.Toast.makeText(context, "🔊 نطق الكلمة: $extractedWord", android.widget.Toast.LENGTH_SHORT).show()
-                        audioPlayUrl = resolvedUrl
-                        audioOriginalUrl = resolvedUrl
-                        audioWord = extractedWord
-                        showMiniPlayer = true
-                    } else {
-                        val extractedWord = extractGermanWord(resolvedUrl, text)
-                        if (extractedWord.isNotEmpty()) {
-                            android.widget.Toast.makeText(context, "🔊 نطق بالصوت الاصطناعي: $extractedWord", android.widget.Toast.LENGTH_SHORT).show()
-                            audioPlayUrl = null
-                            audioOriginalUrl = resolvedUrl
-                            audioWord = extractedWord
-                            showMiniPlayer = true
-                        } else {
-                            android.widget.Toast.makeText(context, "🔗 فتح الرابط: $resolvedUrl", android.widget.Toast.LENGTH_SHORT).show()
-                            inAppBrowserUrl = resolvedUrl
-                        }
-                    }
-                },
-                onUserScrolled = {
-                    scrollTrigger++
-                },
-                onScrollProgress = { progress ->
-                    scrollProgress = progress
-                },
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -2466,26 +2373,17 @@ fun PdfReaderScreen(
             }
 
             // 2. Custom Vertical Fast Scroller with Teardrop
-            AnimatedVisibility(
-                visible = isScrollerVisible,
-                enter = fadeIn(),
-                exit = fadeOut(),
+            PdfVerticalScroller(
+                currentPage = currentPage,
+                totalPages = totalPages,
+                onPageChange = { page ->
+                    currentPage = page
+                    webViewState.jumpToPage(page)
+                },
+                readingTheme = readingTheme,
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
-            ) {
-                PdfVerticalScroller(
-                    currentPage = currentPage,
-                    totalPages = totalPages,
-                    onPageChange = { page ->
-                        currentPage = page
-                        webViewState.jumpToPage(page)
-                    },
-                    readingTheme = readingTheme,
-                    isDragging = isDraggingScroller,
-                    onDraggingChanged = { isDraggingScroller = it },
-                    scrollProgress = scrollProgress
-                )
-            }
+            )
 
             // 3. Floating Capsule Bottom Bar (Bottom Center)
             PdfBottomBar(
@@ -2498,43 +2396,6 @@ fun PdfReaderScreen(
                     .padding(bottom = 24.dp)
                     .navigationBarsPadding()
             )
-
-            // 4. Full Screen In-App Browser
-            inAppBrowserUrl?.let { browserUrl ->
-                InAppBrowser(
-                    url = browserUrl,
-                    onClose = { inAppBrowserUrl = null },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .zIndex(10f)
-                )
-            }
-
-            // 5. Mini Audio Player (Dynamic Island) - Rendered last to appear on top of all content including the browser
-            AnimatedVisibility(
-                visible = showMiniPlayer,
-                enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
-                exit = fadeOut() + slideOutVertically(targetOffsetY = { -it }),
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .statusBarsPadding()
-                    .padding(top = 72.dp)
-                    .zIndex(15f)
-            ) {
-                ReusableMiniAudioPlayer(
-                    word = audioWord,
-                    audioUrl = audioPlayUrl,
-                    externalUrl = audioOriginalUrl,
-                    onOpenExternalUrl = { url ->
-                        inAppBrowserUrl = url
-                    },
-                    onClose = {
-                        showMiniPlayer = false
-                        audioPlayUrl = null
-                        audioOriginalUrl = null
-                    }
-                )
-            }
         }
     }
 
@@ -2704,10 +2565,9 @@ fun AutoSizeText(
     modifier: Modifier = Modifier,
     color: Color = Color.Unspecified,
     fontWeight: FontWeight? = null,
-    maxLines: Int = 1,
-    initialFontSizeSp: Float = 16f
+    maxLines: Int = 1
 ) {
-    var fontSizeValue by remember(text) { mutableStateOf(initialFontSizeSp) }
+    var fontSize by remember(text) { mutableStateOf(16.sp) }
     var readyToDraw by remember(text) { mutableStateOf(false) }
 
     Text(
@@ -2717,13 +2577,13 @@ fun AutoSizeText(
         },
         color = color,
         fontWeight = fontWeight,
-        fontSize = fontSizeValue.sp,
+        fontSize = fontSize,
         maxLines = maxLines,
         overflow = TextOverflow.Clip,
         onTextLayout = { textLayoutResult ->
             if (textLayoutResult.hasVisualOverflow) {
-                if (fontSizeValue > 8f) {
-                    fontSizeValue -= 1f
+                if (fontSize.value > 10f) {
+                    fontSize = (fontSize.value - 1f).sp
                 } else {
                     readyToDraw = true
                 }
@@ -2732,566 +2592,6 @@ fun AutoSizeText(
             }
         }
     )
-}
-
-fun resolveAbsoluteUrl(url: String): String {
-    val trimmed = url.trim()
-    if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("file://") || trimmed.startsWith("content://")) {
-        return trimmed
-    }
-    // If it's a protocol-relative URL (starts with //)
-    if (trimmed.startsWith("//")) {
-        return "https:$trimmed"
-    }
-    // If it's relative, default to arabdict base URL
-    val cleanPath = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
-    return "https://www.arabdict.com$cleanPath"
-}
-
-fun cleanGermanWord(word: String): String {
-    // Keep only German characters, spaces, and hyphens
-    val cleaned = word.replace(Regex("[^a-zA-ZäöüÄÖÜß\\s\\-]"), " ")
-    // Replace multiple spaces with a single space
-    return cleaned.replace(Regex("\\s+"), " ").trim()
-}
-
-fun isDirectAudioUrl(url: String): Boolean {
-    val cleanUrl = url.lowercase()
-    return cleanUrl.endsWith(".mp3") || 
-           cleanUrl.endsWith(".wav") || 
-           cleanUrl.endsWith(".ogg") || 
-           cleanUrl.endsWith(".m4a") || 
-           cleanUrl.endsWith(".aac") ||
-           cleanUrl.contains(".mp3?") ||
-           cleanUrl.contains(".wav?") ||
-           cleanUrl.contains("audio") || 
-           cleanUrl.contains("pronounce") || 
-           cleanUrl.contains("pronunciation") || 
-           cleanUrl.contains("sound") ||
-           cleanUrl.contains("voice") ||
-           cleanUrl.contains("translate_tts") ||
-           cleanUrl.contains("speech") ||
-           cleanUrl.contains("tts") ||
-           cleanUrl.contains("speak.php") ||
-           cleanUrl.contains("rec_play.php")
-}
-
-fun extractWordFromAudioUrl(url: String, text: String): String {
-    val word = extractGermanWord(url, text)
-    if (word.isNotEmpty()) return word
-    return "نطق"
-}
-
-fun extractGermanWord(url: String, text: String): String {
-    val cleanText = text.trim()
-    
-    // 1. If text is a valid German word (not empty, doesn't contain url/www, not just symbols)
-    if (cleanText.isNotEmpty() && 
-        cleanText.length in 2..45 && 
-        !cleanText.contains("http") && 
-        !cleanText.contains("www") && 
-        !cleanText.contains("/") &&
-        cleanText != "Play" && 
-        cleanText != "Audio" && 
-        cleanText != "Nutzungsbedingungen" && 
-        cleanText != "Datenschutz"
-    ) {
-        val stripped = cleanGermanWord(cleanText)
-        if (stripped.length >= 2) {
-            return stripped
-        }
-    }
-
-    // 2. Try extracting from URL query parameters
-    try {
-        val uri = android.net.Uri.parse(url)
-        for (param in listOf("q", "text", "word", "query", "string", "term", "s", "id")) {
-            var v = uri.getQueryParameter(param)
-            if (!v.isNullOrBlank()) {
-                if (param == "id" && (v.startsWith("de_") || v.startsWith("de-"))) {
-                    v = v.substring(3)
-                }
-                val stripped = cleanGermanWord(v)
-                if (stripped.length in 2..45 && !v.contains("/") && !v.matches(Regex("^[0-9]+$"))) {
-                    return stripped
-                }
-            }
-        }
-        
-        // 3. Try parsing path segments (e.g., arabdict.com/ar/deutsch-arabisch/Wort)
-        val pathSegments = uri.pathSegments
-        if (pathSegments != null) {
-            for (segment in pathSegments.reversed()) {
-                if (segment.isNotEmpty() && 
-                    segment.length in 2..45 && 
-                    segment != "deutsch-arabisch" && 
-                    segment != "german-arabic" && 
-                    segment != "speak.php" && 
-                    segment != "rec_play.php" &&
-                    !segment.contains("?") && 
-                    !segment.contains("=")
-                ) {
-                    val decodedSegment = java.net.URLDecoder.decode(segment, "UTF-8").trim()
-                    val stripped = cleanGermanWord(decodedSegment)
-                    if (stripped.length in 2..45 && !decodedSegment.matches(Regex("^[0-9]+$"))) {
-                        return stripped
-                    }
-                }
-            }
-        }
-    } catch (e: Exception) {
-        android.util.Log.e("WordExtractor", "Error extracting word: ${e.message}")
-    }
-
-    return ""
-}
-
-fun checkWordForUrl(word: String): String? {
-    val pattern = java.util.regex.Pattern.compile(
-        "(https?://[-a-zA-Z0-9+&@#/%?=~_|!:,.;]*[-a-zA-Z0-9+&@#/%=~_|])",
-        java.util.regex.Pattern.CASE_INSENSITIVE
-    )
-    val matcher = pattern.matcher(word)
-    return if (matcher.find()) {
-        matcher.group(1)
-    } else {
-        null
-    }
-}
-
-@Composable
-fun ReusableMiniAudioPlayer(
-    word: String,
-    audioUrl: String?,
-    onClose: () -> Unit,
-    externalUrl: String? = null,
-    onOpenExternalUrl: ((String) -> Unit)? = null,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    
-    // Resolve final audio URL: if the word string contains a URL, use that URL as the audio source
-    val finalAudioUrl = remember(word, audioUrl) {
-        val extracted = checkWordForUrl(word)
-        if (!extracted.isNullOrEmpty()) {
-            extracted
-        } else {
-            audioUrl
-        }
-    }
-
-    // Is it playing via direct URL (MediaPlayer) or local TextToSpeech?
-    var isTtsMode by remember(finalAudioUrl) { mutableStateOf(finalAudioUrl.isNullOrEmpty()) }
-
-    var isPlaying by remember { mutableStateOf(false) }
-    var isBuffering by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf(0f) }
-    var duration by remember { mutableStateOf(1) }
-    var currentPosition by remember { mutableStateOf(0) }
-    var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
-    var hasError by remember { mutableStateOf(false) }
-
-    // TTS engine initialization (unconditional so it's always ready)
-    var tts by remember { mutableStateOf<TextToSpeech?>(null) }
-    var isTtsReady by remember { mutableStateOf(false) }
-
-    // TTS speaker helper
-    val speakTts = {
-        val currentTts = tts
-        if (currentTts != null && isTtsReady) {
-            isPlaying = true
-            progress = 0f
-            // Filter out any URL or path elements from the word before speaking it
-            val speakText = word.substringBefore("http").substringBefore("www").trim()
-            if (speakText.isNotEmpty()) {
-                currentTts.speak(speakText, TextToSpeech.QUEUE_FLUSH, null, "ReusableMiniPlayerTTS")
-            }
-        }
-    }
-
-    DisposableEffect(context) {
-        var ttsEngine: TextToSpeech? = null
-        ttsEngine = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                ttsEngine?.language = java.util.Locale.GERMAN
-                isTtsReady = true
-            }
-        }
-        tts = ttsEngine
-        
-        onDispose {
-            ttsEngine?.stop()
-            ttsEngine?.shutdown()
-        }
-    }
-
-    // MediaPlayer setup
-    LaunchedEffect(finalAudioUrl) {
-        if (finalAudioUrl.isNullOrEmpty()) {
-            mediaPlayer?.release()
-            mediaPlayer = null
-            return@LaunchedEffect
-        }
-
-        isBuffering = true
-        isPlaying = false
-        progress = 0f
-        hasError = false
-
-        mediaPlayer?.release()
-
-        val mp = MediaPlayer().apply {
-            try {
-                // Pass standard browser User-Agent to prevent sites from blocking the audio request as a bot
-                val headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
-                    "Referer" to "https://www.arabdict.com/"
-                )
-                setDataSource(context, android.net.Uri.parse(finalAudioUrl), headers)
-                
-                setOnPreparedListener {
-                    isBuffering = false
-                    isPlaying = true
-                    duration = it.duration.coerceAtLeast(1)
-                    it.start()
-                }
-                setOnCompletionListener {
-                    isPlaying = false
-                    progress = 1.0f
-                    // Smooth Auto-hide
-                    onClose()
-                }
-                setOnErrorListener { _, _, _ ->
-                    isBuffering = false
-                    isPlaying = false
-                    hasError = true
-                    android.util.Log.e("ReusableAudioPlayer", "MediaPlayer onError - switching to TTS fallback")
-                    // Automatic fallback to TTS
-                    isTtsMode = true
-                    speakTts()
-                    true
-                }
-                prepareAsync()
-            } catch (e: Exception) {
-                isBuffering = false
-                isPlaying = false
-                hasError = true
-                android.util.Log.e("ReusableAudioPlayer", "Error loading audio, switching to TTS: ${e.message}")
-                // Automatic fallback to TTS
-                isTtsMode = true
-                speakTts()
-            }
-        }
-        mediaPlayer = mp
-    }
-
-    // Auto-trigger TTS play on start if in TTS mode and word changes
-    LaunchedEffect(word, isTtsReady, isTtsMode) {
-        if (isTtsMode && isTtsReady) {
-            speakTts()
-        }
-    }
-
-    // Play/Pause Click Handler
-    val handlePlayPause = {
-        if (isTtsMode) {
-            if (isPlaying) {
-                tts?.stop()
-                isPlaying = false
-            } else {
-                speakTts()
-            }
-        } else {
-            val mp = mediaPlayer
-            if (mp != null && !isBuffering && !hasError) {
-                try {
-                    if (mp.isPlaying) {
-                        mp.pause()
-                        isPlaying = false
-                    } else {
-                        if (mp.currentPosition >= duration - 300) {
-                            mp.seekTo(0)
-                        }
-                        mp.start()
-                        isPlaying = true
-                    }
-                } catch (e: Exception) {
-                    // Ignore
-                }
-            }
-        }
-    }
-
-    // Replay Click Handler
-    val handleReplay = {
-        if (isTtsMode) {
-            speakTts()
-        } else {
-            val mp = mediaPlayer
-            if (mp != null && !isBuffering && !hasError) {
-                try {
-                    mp.seekTo(0)
-                    mp.start()
-                    isPlaying = true
-                    progress = 0f
-                } catch (e: Exception) {
-                    // Ignore
-                }
-            }
-        }
-    }
-
-    // Keep progress updated
-    LaunchedEffect(mediaPlayer, isPlaying, isTtsMode, word) {
-        if (!isTtsMode && mediaPlayer != null) {
-            while (isPlaying) {
-                val mp = mediaPlayer
-                if (mp != null) {
-                    try {
-                        val pos = mp.currentPosition
-                        currentPosition = pos
-                        val dur = mp.duration.coerceAtLeast(1)
-                        duration = dur
-                        progress = pos.toFloat() / dur.toFloat()
-                    } catch (e: Exception) {
-                        // Ignore
-                    }
-                }
-                kotlinx.coroutines.delay(50)
-            }
-        } else if (isTtsMode && isPlaying) {
-            val startTime = System.currentTimeMillis()
-            val estimatedDuration = (word.length * 100L + 600L).coerceIn(1000L, 3500L)
-            while (isPlaying) {
-                val elapsed = System.currentTimeMillis() - startTime
-                if (elapsed >= estimatedDuration) {
-                    progress = 1.0f
-                    isPlaying = false
-                    // Auto-hide
-                    onClose()
-                } else {
-                    progress = elapsed.toFloat() / estimatedDuration.toFloat()
-                }
-                kotlinx.coroutines.delay(30)
-            }
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            mediaPlayer?.release()
-            mediaPlayer = null
-        }
-    }
-
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = Color(0xFF1E1F22),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
-        shadowElevation = 8.dp,
-        tonalElevation = 8.dp,
-        modifier = modifier
-            .widthIn(min = 220.dp, max = 340.dp)
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(44.dp)
-                    .padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                // Play/Pause, Loading Indicator, and Replay Button
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        if (isBuffering) {
-                            CircularProgressIndicator(
-                                color = Color(0xFF9C27B0), // Lavender accent
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        } else {
-                            IconButton(
-                                onClick = handlePlayPause,
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
-                                    contentDescription = if (isPlaying) "إيقاف مؤقت" else "تشغيل",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    // Replay button (إعادة النطق)
-                    IconButton(
-                        onClick = handleReplay,
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "إعادة النطق",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-
-                // Word text with Marquee effect to handle long words gracefully
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    // Filter out any URL or path from display
-                    val displayWord = word.substringBefore("http").substringBefore("www").trim()
-                    AutoSizeText(
-                        text = displayWord.ifEmpty { "تشغيل" },
-                        color = Color.White,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        initialFontSizeSp = 13f,
-                        modifier = Modifier.basicMarquee()
-                    )
-                }
-
-                // Actions (Browser link if available, and Close)
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    if (!externalUrl.isNullOrEmpty() && onOpenExternalUrl != null) {
-                        IconButton(
-                            onClick = { onOpenExternalUrl(externalUrl) },
-                            modifier = Modifier.size(28.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Link,
-                                contentDescription = "فتح في المتصفح",
-                                tint = Color.White.copy(alpha = 0.7f),
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-
-                    IconButton(
-                        onClick = {
-                            mediaPlayer?.release()
-                            mediaPlayer = null
-                            tts?.stop()
-                            onClose()
-                        },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "إغلاق",
-                            tint = Color.White.copy(alpha = 0.6f),
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-            }
-
-            // Bottom Progress Indicator
-            LinearProgressIndicator(
-                progress = { progress.coerceIn(0f, 1f) },
-                color = Color(0xFF9C27B0), // Purple accent
-                trackColor = Color.White.copy(alpha = 0.1f),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.5.dp)
-            )
-        }
-    }
-}
-
-@Composable
-fun InAppBrowser(
-    url: String,
-    onClose: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        color = Color.White,
-        modifier = modifier.fillMaxSize()
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // In-app Browser Header
-            Surface(
-                color = Color(0xFF1E1F22),
-                contentColor = Color.White,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                        .height(56.dp)
-                        .padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(onClick = onClose) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "رجوع إلى المستند",
-                            tint = Color.White
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "المستعرض",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-
-            // In-app Browser Content (WebView)
-            AndroidView(
-                factory = { context ->
-                    WebView(context).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                        settings.apply {
-                            javaScriptEnabled = true
-                            domStorageEnabled = true
-                            useWideViewPort = true
-                            loadWithOverviewMode = true
-                            supportZoom()
-                            builtInZoomControls = true
-                            displayZoomControls = false
-                        }
-                        webViewClient = object : WebViewClient() {
-                            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                                return false // Allow page loading inside the local webview
-                            }
-                        }
-                        loadUrl(url)
-                    }
-                },
-                modifier = Modifier.weight(1f)
-            )
-        }
-    }
 }
 
 @Composable
@@ -3518,18 +2818,17 @@ fun PdfVerticalScroller(
     totalPages: Int,
     onPageChange: (Int) -> Unit,
     readingTheme: String,
-    isDragging: Boolean,
-    onDraggingChanged: (Boolean) -> Unit,
-    scrollProgress: Float,
     modifier: Modifier = Modifier
 ) {
     if (totalPages <= 1) return
 
+    // Track state of dragging
+    var isDragging by remember { mutableStateOf(false) }
     // Local drag position y (fraction from 0.0 to 1.0)
     var dragFraction by remember { mutableStateOf(0f) }
 
     // Use a spring animation to smoothly transition the handle position when NOT dragging
-    val targetFraction = scrollProgress.coerceIn(0f, 1f)
+    val targetFraction = ((currentPage - 1).toFloat() / (totalPages - 1).toFloat()).coerceIn(0f, 1f)
     val animatedFraction by animateFloatAsState(
         targetValue = targetFraction,
         animationSpec = spring(stiffness = Spring.StiffnessLow),
@@ -3547,7 +2846,7 @@ fun PdfVerticalScroller(
 
     BoxWithConstraints(
         modifier = modifier
-            .width(60.dp)
+            .width(100.dp)
             .fillMaxHeight()
             .padding(vertical = 120.dp) // Avoid overlapping with top capsule and bottom floating bar
     ) {
@@ -3555,7 +2854,7 @@ fun PdfVerticalScroller(
         if (totalHeightPx <= 0f) return@BoxWithConstraints
 
         // Vertical Track (on the right side)
-        // We place the track at x = 44.dp (which is 16.dp from the right edge of a 60.dp container)
+        // We place the track at x = 84.dp (which is 16.dp from the right edge)
         val trackWidth = 4.dp
 
         // Draw track and progress
@@ -3577,9 +2876,9 @@ fun PdfVerticalScroller(
         }
 
         // Draggable Teardrop Handle
-        // The teardrop handle has width = 50.dp, height = 32.dp
+        // The teardrop handle has width = 75.dp, height = 48.dp
         // Its vertical position is proportional to currentFraction
-        val handleHeight = 32.dp
+        val handleHeight = 48.dp
         val maxOffsetPx = totalHeightPx - with(LocalDensity.current) { handleHeight.toPx() }
         val handleOffsetPx = currentFraction * maxOffsetPx
 
@@ -3593,14 +2892,14 @@ fun PdfVerticalScroller(
                 .pointerInput(totalPages) {
                     detectDragGestures(
                         onDragStart = {
-                            onDraggingChanged(true)
+                            isDragging = true
                             dragFraction = targetFraction
                         },
                         onDragEnd = {
-                            onDraggingChanged(false)
+                            isDragging = false
                         },
                         onDragCancel = {
-                            onDraggingChanged(false)
+                            isDragging = false
                         },
                         onDrag = { change, dragAmount ->
                             change.consume()
@@ -3616,7 +2915,7 @@ fun PdfVerticalScroller(
                         }
                     )
                 }
-                .size(width = 50.dp, height = handleHeight)
+                .size(width = 75.dp, height = handleHeight)
                 .drawBehind {
                     // Draw custom teardrop pointing left (bulb on the right, point on the left)
                     val r = size.height / 2f
@@ -3644,18 +2943,18 @@ fun PdfVerticalScroller(
                     )
                 }
         ) {
-            // Text centered inside the round bulb (the rightmost 32.dp)
+            // Text centered inside the round bulb (the rightmost 48.dp)
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
-                    .size(32.dp),
+                    .size(48.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = "${if (isDragging) (1 + (dragFraction * (totalPages - 1))).roundToInt().coerceIn(1, totalPages) else currentPage}",
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
+                    fontSize = 15.sp
                 )
             }
         }
@@ -3696,9 +2995,6 @@ fun PdfWebView(
     onPageChanged: (page: Int, total: Int) -> Unit,
     onSearchMatchesCount: (current: Int, total: Int) -> Unit,
     onSearchStateChanged: (state: Int, previous: Boolean) -> Unit,
-    onLinkClicked: (url: String, text: String) -> Unit,
-    onUserScrolled: () -> Unit,
-    onScrollProgress: (fraction: Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -3748,10 +3044,7 @@ fun PdfWebView(
                     AndroidBridge(
                         onPageChanged = onPageChanged,
                         onSearchMatchesCount = onSearchMatchesCount,
-                        onSearchStateChanged = onSearchStateChanged,
-                        onLinkClicked = onLinkClicked,
-                        onUserScrolled = onUserScrolled,
-                        onScrollProgress = onScrollProgress
+                        onSearchStateChanged = onSearchStateChanged
                     ),
                     "AndroidBridge"
                 )
@@ -3769,18 +3062,6 @@ fun PdfWebView(
                         request: WebResourceRequest
                     ): WebResourceResponse? {
                         return assetLoader.shouldInterceptRequest(request.url)
-                    }
-
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView?,
-                        request: WebResourceRequest?
-                    ): Boolean {
-                        val requestUrl = request?.url?.toString() ?: return false
-                        if (requestUrl.contains("appassets.androidplatform.net") || requestUrl.startsWith("file://")) {
-                            return false
-                        }
-                        onLinkClicked(requestUrl, "")
-                        return true
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -3871,15 +3152,8 @@ private fun applyPdfTheme(webView: WebView?, theme: String) {
 private fun injectPdfBridge(webView: WebView?) {
     val js = """
         (function() {
-            function getAndroidBridge() {
-                if (typeof window !== 'undefined' && window.AndroidBridge) {
-                    return window.AndroidBridge;
-                }
-                if (typeof AndroidBridge !== 'undefined') {
-                    return AndroidBridge;
-                }
-                return null;
-            }
+            if (window.hasPdfBridgeInjected) return;
+            window.hasPdfBridgeInjected = true;
 
             let lastReportedPage = -1;
             let lastReportedTotal = -1;
@@ -3906,9 +3180,8 @@ private fun injectPdfBridge(webView: WebView?) {
 
             function reportPage(p, t) {
                 try {
-                    let b = getAndroidBridge();
-                    if (b && typeof b.onPageChanged === "function") {
-                        b.onPageChanged(p, t);
+                    if (window.AndroidBridge && typeof window.AndroidBridge.onPageChanged === "function") {
+                        window.AndroidBridge.onPageChanged(p, t);
                         lastReportedPage = p;
                         lastReportedTotal = t;
                         return true;
@@ -3921,9 +3194,8 @@ private fun injectPdfBridge(webView: WebView?) {
 
             function reportSearchMatches(current, total) {
                 try {
-                    let b = getAndroidBridge();
-                    if (b && typeof b.onSearchMatchesCount === 'function') {
-                        b.onSearchMatchesCount(current, total);
+                    if (window.AndroidBridge && typeof window.AndroidBridge.onSearchMatchesCount === 'function') {
+                        window.AndroidBridge.onSearchMatchesCount(current, total);
                         lastReportedMatchCurrent = current;
                         lastReportedMatchTotal = total;
                         return true;
@@ -4013,10 +3285,7 @@ private fun injectPdfBridge(webView: WebView?) {
             function registerEvents() {
                 try {
                     if (window.PDFViewerApplication && window.PDFViewerApplication.eventBus) {
-                        const bus = window.PDFViewerApplication.eventBus;
-                        if (!bus.hasEventBridgeRegistered) {
-                            bus.hasEventBridgeRegistered = true;
-                            
+                        const registerBusEvents = (bus) => {
                             bus.on('pagechanging', (e) => {
                                 let total = 0;
                                 if (window.PDFViewerApplication.pdfDocument) {
@@ -4066,9 +3335,8 @@ private fun injectPdfBridge(webView: WebView?) {
 
                             bus.on('updatefindcontrolstate', (e) => {
                                 try {
-                                    let b = getAndroidBridge();
-                                    if (b && typeof b.onSearchStateChanged === 'function') {
-                                        b.onSearchStateChanged(e.state, e.previous);
+                                    if (window.AndroidBridge && typeof window.AndroidBridge.onSearchStateChanged === 'function') {
+                                        window.AndroidBridge.onSearchStateChanged(e.state, e.previous);
                                     }
                                     if (e.matchesCount) {
                                         const current = typeof e.matchesCount.current === 'number' ? e.matchesCount.current : 0;
@@ -4077,7 +3345,9 @@ private fun injectPdfBridge(webView: WebView?) {
                                     }
                                 } catch (err) {}
                             });
-                        }
+                        };
+
+                        registerBusEvents(window.PDFViewerApplication.eventBus);
                     } else {
                         setTimeout(registerEvents, 100);
                     }
@@ -4086,171 +3356,7 @@ private fun injectPdfBridge(webView: WebView?) {
                 }
             }
 
-            function setupScrollListener() {
-                try {
-                    let container = document.getElementById('viewerContainer');
-                    if (container) {
-                        container.addEventListener('scroll', () => {
-                            try {
-                                let b = getAndroidBridge();
-                                if (b && typeof b.onUserScrolled === 'function') {
-                                    b.onUserScrolled();
-                                }
-                                
-                                let scrollTop = container.scrollTop;
-                                let scrollHeight = container.scrollHeight;
-                                let clientHeight = container.clientHeight;
-                                let maxScroll = scrollHeight - clientHeight;
-                                if (maxScroll > 0) {
-                                    let progress = scrollTop / maxScroll;
-                                    if (b && typeof b.onScrollProgress === 'function') {
-                                        b.onScrollProgress(progress);
-                                    }
-                                }
-
-                                if (window.PDFViewerApplication && window.PDFViewerApplication.pdfViewer) {
-                                    let page = window.PDFViewerApplication.pdfViewer.currentPageNumber;
-                                    let total = window.PDFViewerApplication.pdfViewer.pagesCount || (window.PDFViewerApplication.pdfDocument && window.PDFViewerApplication.pdfDocument.numPages) || 1;
-                                    if (page && (page !== lastReportedPage || total !== lastReportedTotal)) {
-                                        reportPage(page, total);
-                                    }
-                                }
-                            } catch (e) {
-                                console.error("Scroll listener run error: " + e.message);
-                            }
-                        }, { passive: true });
-                    } else {
-                        setTimeout(setupScrollListener, 200);
-                    }
-                } catch (e) {
-                    console.error("Scroll listener setup error: " + e.message);
-                }
-            }
-
-            function setupLinkInterceptor() {
-                try {
-                    document.addEventListener('click', function(e) {
-                        var target = e.target;
-                        var isLink = false;
-                        var clickedLinkNode = null;
-                        while (target) {
-                            if (target.tagName && target.tagName.toUpperCase() === 'A' && target.getAttribute('href')) {
-                                isLink = true;
-                                clickedLinkNode = target;
-                                break;
-                            }
-                            target = target.parentNode;
-                        }
-                        if (isLink && clickedLinkNode) {
-                            var href = clickedLinkNode.getAttribute('href');
-                            var text = "";
-                            try {
-                                var originalPointerEvents = clickedLinkNode.style.pointerEvents;
-                                clickedLinkNode.style.pointerEvents = 'none';
-                                var elementUnder = document.elementFromPoint(e.clientX, e.clientY);
-                                clickedLinkNode.style.pointerEvents = originalPointerEvents || '';
-                                if (elementUnder) {
-                                    text = elementUnder.textContent || elementUnder.innerText || "";
-                                }
-                            } catch (err) {
-                                console.error("Pointer events word extraction error: " + err);
-                            }
-                            if (!text || text.trim().length === 0) {
-                                text = clickedLinkNode.textContent || clickedLinkNode.innerText || "";
-                            }
-                            if (href && href.trim().length > 0 && !href.startsWith('#') && !href.startsWith('javascript:')) {
-                                var b = getAndroidBridge();
-                                if (b && typeof b.onLinkClicked === 'function') {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    b.onLinkClicked(href, text.trim());
-                                    return;
-                                }
-                            }
-                        }
-                    }, true);
-                } catch (e) {
-                    console.error("Link interceptor setup error: " + e.message);
-                }
-            }
-
-            function setupLinkServiceOverride() {
-                try {
-                    let app = window.PDFViewerApplication;
-                    if (app) {
-                        let linkService = app.pdfLinkService || app.linkService;
-                        if (linkService) {
-                            if (!linkService.hasLinkOverride) {
-                                linkService.hasLinkOverride = true;
-                                
-                                let originalAddLinkAttributes = linkService.addLinkAttributes;
-                                if (originalAddLinkAttributes) {
-                                    linkService.addLinkAttributes = function(link, url, newWindow) {
-                                        try {
-                                            originalAddLinkAttributes.apply(this, arguments);
-                                            if (link && url) {
-                                                link.addEventListener('click', (e) => {
-                                                    let b = getAndroidBridge();
-                                                    if (b && typeof b.onLinkClicked === 'function') {
-                                                        e.preventDefault();
-                                                        e.stopPropagation();
-                                                        let text = link.innerText || link.textContent || "";
-                                                        b.onLinkClicked(url, text.trim());
-                                                    }
-                                                }, true);
-                                            }
-                                        } catch (err) {
-                                            console.error("Error in overridden addLinkAttributes: " + err.message);
-                                        }
-                                    };
-                                }
-
-                                linkService.openExternalLink = function(url) {
-                                    console.log("PDFJS intercepted openExternalLink: " + url);
-                                    let b = getAndroidBridge();
-                                    if (b && typeof b.onLinkClicked === 'function') {
-                                        b.onLinkClicked(url, "");
-                                    }
-                                };
-                            }
-                        } else {
-                            setTimeout(setupLinkServiceOverride, 200);
-                        }
-                    } else {
-                        setTimeout(setupLinkServiceOverride, 200);
-                    }
-                } catch (e) {
-                    console.error("LinkService override error: " + e.message);
-                }
-            }
-
-            // Global once-only initialization
-            if (!window.hasPdfBridgeInjected) {
-                window.hasPdfBridgeInjected = true;
-                
-                // 1. Setup global window.open override
-                window.open = function(url, target, features) {
-                    console.log("window.open intercepted: " + url);
-                    let b = getAndroidBridge();
-                    if (b && typeof b.onLinkClicked === 'function') {
-                        b.onLinkClicked(url, "");
-                        return { close: function() {} };
-                    }
-                    return null;
-                };
-
-                // 2. Setup global click event listener (link interceptor)
-                setupLinkInterceptor();
-
-                // 3. Setup global scroll listener
-                setupScrollListener();
-
-                // 4. Start polling
-                poll();
-            }
-
-            // Dynamic updates/overrides (runs every time document changes or updates, internally guarded)
-            setupLinkServiceOverride();
+            poll();
             registerEvents();
         })();
     """.trimIndent()

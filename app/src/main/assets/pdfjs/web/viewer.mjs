@@ -1054,24 +1054,10 @@ class PDFLinkService {
     if (!url || typeof url !== "string") {
       throw new Error('A valid "url" parameter must provided.');
     }
-    const target = LinkTarget.SELF,
+    const target = newWindow ? LinkTarget.BLANK : this.externalLinkTarget,
       rel = this.externalLinkRel;
     if (this.externalLinkEnabled) {
       link.href = link.title = url;
-      link.onclick = (e) => {
-        try {
-          let bridge = (typeof window !== 'undefined' && window.AndroidBridge) || (typeof AndroidBridge !== 'undefined' ? AndroidBridge : null);
-          if (bridge && typeof bridge.onLinkClicked === 'function') {
-            e.preventDefault();
-            e.stopPropagation();
-            let text = link.innerText || link.textContent || "";
-            bridge.onLinkClicked(url, text.trim());
-            return false;
-          }
-        } catch (err) {
-          console.error("AndroidBridge error in click: " + err);
-        }
-      };
     } else {
       link.href = "";
       link.title = `Disabled: ${url}`;
