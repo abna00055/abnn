@@ -1240,7 +1240,8 @@ class PdfWebViewState {
 class AndroidBridge(
     private val onPageChanged: (page: Int, total: Int) -> Unit,
     private val onSearchMatchesCount: (current: Int, total: Int) -> Unit,
-    private val onSearchStateChanged: (state: Int, previous: Boolean) -> Unit
+    private val onSearchStateChanged: (state: Int, previous: Boolean) -> Unit,
+    private val onLinkClicked: (url: String) -> Unit
 ) {
     private val handler = Handler(Looper.getMainLooper())
 
@@ -1265,6 +1266,14 @@ class AndroidBridge(
         android.util.Log.d("PDF_BRIDGE", "onSearchStateChanged called: state=$state, previous=$previous")
         handler.post {
             onSearchStateChanged(state, previous)
+        }
+    }
+
+    @JavascriptInterface
+    fun onLinkClicked(url: String) {
+        android.util.Log.d("PDF_BRIDGE", "onLinkClicked called: url=$url")
+        handler.post {
+            onLinkClicked(url)
         }
     }
 }
@@ -2198,6 +2207,124 @@ fun PdfReaderScreen(
     var scrollMode by remember { mutableStateOf(0) } // 0: Vertical, 1: Horizontal
     var snapToPage by remember { mutableStateOf(false) }
 
+    // --- Audio Player and Embedded Browser States ---
+    var activeAudioUrl by remember { mutableStateOf<String?>(null) }
+    var isAudioPlaying by remember { mutableStateOf(false) }
+    var isAudioLoading by remember { mutableStateOf(false) }
+    var audioDuration by remember { mutableStateOf(0) }
+    var audioPosition by remember { mutableStateOf(0) }
+    var activeWebUrl by remember { mutableStateOf<String?>(null) }
+
+    val mediaPlayer = remember { android.media.MediaPlayer() }
+
+    // Update position ticker when playing
+    LaunchedEffect(isAudioPlaying) {
+        if (isAudioPlaying) {
+            while (true) {
+                try {
+                    if (mediaPlayer.isPlaying) {
+                        audioPosition = mediaPlayer.currentPosition
+                    }
+                } catch (e: Exception) {}
+                kotlinx.coroutines.delay(250)
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                mediaPlayer.stop()
+                mediaPlayer.release()
+            } catch (e: Exception) {}
+        }
+    }
+
+    val playAudio = remember(context) {
+        { url: String ->
+            activeAudioUrl = url
+            isAudioLoading = true
+            isAudioPlaying = false
+            audioPosition = 0
+            audioDuration = 0
+            try {
+                mediaPlayer.reset()
+                mediaPlayer.setDataSource(context, Uri.parse(url))
+                mediaPlayer.setOnPreparedListener { mp ->
+                    isAudioLoading = false
+                    isAudioPlaying = true
+                    audioDuration = mp.duration
+                    mp.start()
+                }
+                mediaPlayer.setOnCompletionListener {
+                    isAudioPlaying = false
+                    audioPosition = 0
+                }
+                mediaPlayer.setOnErrorListener { _, _, _ ->
+                    isAudioLoading = false
+                    isAudioPlaying = false
+                    Toast.makeText(context, "فشل تشغيل الملف الصوتي", Toast.LENGTH_SHORT).show()
+                    true
+                }
+                mediaPlayer.prepareAsync()
+            } catch (e: Exception) {
+                isAudioLoading = false
+                Toast.makeText(context, "خطأ في تشغيل الصوت: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val togglePlayPause = {
+        try {
+            if (mediaPlayer.isPlaying) {
+                mediaPlayer.pause()
+                isAudioPlaying = false
+            } else {
+                mediaPlayer.start()
+                isAudioPlaying = true
+            }
+        } catch (e: Exception) {}
+    }
+
+    val seekTo = { position: Int ->
+        try {
+            mediaPlayer.seekTo(position)
+            audioPosition = position
+        } catch (e: Exception) {}
+    }
+
+    val dismissPlayer = {
+        try {
+            if (mediaPlayer.isPlaying) {
+                mediaPlayer.stop()
+            }
+            mediaPlayer.reset()
+        } catch (e: Exception) {}
+        activeAudioUrl = null
+        isAudioPlaying = false
+        isAudioLoading = false
+    }
+
+    val onLinkClicked: (String) -> Unit = { url ->
+        val cleanUrl = url.lowercase()
+        val isAudio = cleanUrl.endsWith(".mp3") ||
+                cleanUrl.endsWith(".wav") ||
+                cleanUrl.endsWith(".m4a") ||
+                cleanUrl.endsWith(".ogg") ||
+                cleanUrl.endsWith(".aac") ||
+                cleanUrl.endsWith(".mp4") ||
+                cleanUrl.contains("/audio/") ||
+                cleanUrl.contains("/sound/") ||
+                cleanUrl.contains("media.dwds.de") ||
+                cleanUrl.contains("pronunciation")
+
+        if (isAudio) {
+            playAudio(url)
+        } else {
+            activeWebUrl = url
+        }
+    }
+
     // Bookmarking and Auto-scroll
     var bookmarks by remember { mutableStateOf(setOf<Int>()) }
     var isAutoScrolling by remember { mutableStateOf(false) }
@@ -2312,6 +2439,7 @@ fun PdfReaderScreen(
                         searchTotalMatches = 0
                     }
                 },
+                onLinkClicked = onLinkClicked,
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -2385,17 +2513,41 @@ fun PdfReaderScreen(
                     .align(Alignment.CenterEnd)
             )
 
-            // 3. Floating Capsule Bottom Bar (Bottom Center)
-            PdfBottomBar(
-                onToggleSidebar = { webViewState.toggleSidebar() },
-                onZoomClick = { activeBottomSheet = ReaderBottomSheetType.ZOOM_DISPLAY },
-                onDisplaySettingsClick = { activeBottomSheet = ReaderBottomSheetType.DISPLAY_SETTINGS },
-                onMoreOptionsClick = { activeBottomSheet = ReaderBottomSheetType.MORE_OPTIONS },
+            // 3. Floating Capsule Bottom Bar (Bottom Center) & Audio Mini Player
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 24.dp)
-                    .navigationBarsPadding()
-            )
+                    .navigationBarsPadding(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                AnimatedVisibility(
+                    visible = activeAudioUrl != null,
+                    enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
+                    exit = fadeOut() + slideOutVertically(targetOffsetY = { it })
+                ) {
+                    activeAudioUrl?.let { url ->
+                        AudioMiniPlayer(
+                            wordName = getWordNameFromAudioUrl(url),
+                            isPlaying = isAudioPlaying,
+                            isLoading = isAudioLoading,
+                            position = audioPosition,
+                            duration = audioDuration,
+                            onPlayPauseToggle = togglePlayPause,
+                            onSeek = seekTo,
+                            onClose = dismissPlayer
+                        )
+                    }
+                }
+
+                PdfBottomBar(
+                    onToggleSidebar = { webViewState.toggleSidebar() },
+                    onZoomClick = { activeBottomSheet = ReaderBottomSheetType.ZOOM_DISPLAY },
+                    onDisplaySettingsClick = { activeBottomSheet = ReaderBottomSheetType.DISPLAY_SETTINGS },
+                    onMoreOptionsClick = { activeBottomSheet = ReaderBottomSheetType.MORE_OPTIONS }
+                )
+            }
         }
     }
 
@@ -2522,6 +2674,13 @@ fun PdfReaderScreen(
                 else -> {}
             }
         }
+    }
+
+    if (activeWebUrl != null) {
+        EmbeddedBrowserSheet(
+            url = activeWebUrl!!,
+            onClose = { activeWebUrl = null }
+        )
     }
 }
 
@@ -2995,6 +3154,7 @@ fun PdfWebView(
     onPageChanged: (page: Int, total: Int) -> Unit,
     onSearchMatchesCount: (current: Int, total: Int) -> Unit,
     onSearchStateChanged: (state: Int, previous: Boolean) -> Unit,
+    onLinkClicked: (url: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -3044,7 +3204,8 @@ fun PdfWebView(
                     AndroidBridge(
                         onPageChanged = onPageChanged,
                         onSearchMatchesCount = onSearchMatchesCount,
-                        onSearchStateChanged = onSearchStateChanged
+                        onSearchStateChanged = onSearchStateChanged,
+                        onLinkClicked = onLinkClicked
                     ),
                     "AndroidBridge"
                 )
@@ -3062,6 +3223,30 @@ fun PdfWebView(
                         request: WebResourceRequest
                     ): WebResourceResponse? {
                         return assetLoader.shouldInterceptRequest(request.url)
+                    }
+
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        val url = request?.url?.toString() ?: return false
+                        if (url.startsWith("http://") || url.startsWith("https://")) {
+                            onLinkClicked(url)
+                            return true
+                        }
+                        return false
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        url: String?
+                    ): Boolean {
+                        if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                            onLinkClicked(url)
+                            return true
+                        }
+                        return false
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -3356,6 +3541,20 @@ private fun injectPdfBridge(webView: WebView?) {
                 }
             }
 
+            document.addEventListener('click', function(e) {
+                const target = e.target.closest('a');
+                if (target && target.href) {
+                    const href = target.href;
+                    if (href.startsWith('http://') || href.startsWith('https://')) {
+                        if (window.AndroidBridge && typeof window.AndroidBridge.onLinkClicked === 'function') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            window.AndroidBridge.onLinkClicked(href);
+                        }
+                    }
+                }
+            }, true);
+
             poll();
             registerEvents();
         })();
@@ -3401,5 +3600,233 @@ private fun getPdfPageCount(filePath: String): Int {
         try {
             pfd?.close()
         } catch (e: Exception) {}
+    }
+}
+
+fun getWordNameFromAudioUrl(url: String): String {
+    return try {
+        val lastSegment = url.substringAfterLast("/")
+        val cleanName = lastSegment.substringBefore(".")
+        java.net.URLDecoder.decode(cleanName, "UTF-8")
+    } catch (e: Exception) {
+        "صوت نطق الكلمة"
+    }
+}
+
+@Composable
+fun AudioMiniPlayer(
+    wordName: String,
+    isPlaying: Boolean,
+    isLoading: Boolean,
+    position: Int,
+    duration: Int,
+    onPlayPauseToggle: () -> Unit,
+    onSeek: (Int) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(16.dp)
+            ),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Play/Pause/Loading Button
+                Box(
+                    modifier = Modifier.size(40.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            strokeWidth = 2.5.dp
+                        )
+                    } else {
+                        IconButton(
+                            onClick = onPlayPauseToggle,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary)
+                                .size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                contentDescription = if (isPlaying) "إيقاف مؤقت" else "تشغيل",
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                // Word Title and progress text
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "نطق الكلمة: $wordName",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    
+                    val formattedTime = remember(position, duration) {
+                        val posSec = (position / 1000) % 60
+                        val posMin = (position / 1000) / 60
+                        val durSec = (duration / 1000) % 60
+                        val durMin = (duration / 1000) / 60
+                        String.format(Locale.getDefault(), "%02d:%02d / %02d:%02d", posMin, posSec, durMin, durSec)
+                    }
+                    
+                    Text(
+                        text = formattedTime,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // Close Button
+                IconButton(onClick = onClose) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "إغلاق المشغل",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Slider progress bar
+            Slider(
+                value = if (duration > 0) position.toFloat() / duration.toFloat() else 0f,
+                onValueChange = { fraction ->
+                    if (duration > 0) {
+                        onSeek((fraction * duration).toInt())
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(24.dp),
+                colors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                    inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
+                )
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun EmbeddedBrowserSheet(
+    url: String,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isLoading by remember { mutableStateOf(true) }
+    var pageTitle by remember { mutableStateOf("جاري التحميل...") }
+
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
+        containerColor = MaterialTheme.colorScheme.surface,
+        dragHandle = null,
+        modifier = modifier.fillMaxHeight(0.9f)
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Header Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "إغلاق المتصفح المدمج",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                
+                Column(modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
+                    Text(
+                        text = pageTitle,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = url,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp).padding(end = 4.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            HorizontalDivider()
+
+            // Inline WebView
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            allowFileAccess = true
+                            allowContentAccess = true
+                        }
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                isLoading = true
+                            }
+                            
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                isLoading = false
+                                pageTitle = view?.title ?: "المتصفح المدمج"
+                            }
+                        }
+                        loadUrl(url)
+                    }
+                },
+                modifier = Modifier.weight(1f).fillMaxWidth()
+            )
+        }
     }
 }
