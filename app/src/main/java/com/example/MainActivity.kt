@@ -2376,31 +2376,26 @@ fun PdfReaderScreen(
                     }
                 },
                 onLinkClicked = { url, text ->
-                    android.util.Log.d("PDF_LINK_CLICK", "URL clicked: $url, Text: $text")
-                    if (isDirectAudioUrl(url)) {
-                        val extractedWord = extractWordFromAudioUrl(url, text)
+                    val resolvedUrl = resolveAbsoluteUrl(url)
+                    android.util.Log.d("PDF_LINK_CLICK", "URL clicked: $url -> Resolved: $resolvedUrl, Text: $text")
+                    if (isDirectAudioUrl(resolvedUrl)) {
+                        val extractedWord = extractWordFromAudioUrl(resolvedUrl, text)
                         android.widget.Toast.makeText(context, "🔊 نطق الكلمة: $extractedWord", android.widget.Toast.LENGTH_SHORT).show()
-                        audioPlayUrl = url
-                        audioOriginalUrl = url
+                        audioPlayUrl = resolvedUrl
+                        audioOriginalUrl = resolvedUrl
                         audioWord = extractedWord
                         showMiniPlayer = true
                     } else {
-                        val lower = url.lowercase()
-                        val isDict = lower.contains("arabdict") || lower.contains("dict.cc") || lower.contains("duden") || lower.contains("deutsch") || lower.contains("anbricht")
-                        if (isDict) {
-                            val extractedWord = extractGermanWord(url, text)
-                            if (extractedWord.isNotEmpty()) {
-                                android.widget.Toast.makeText(context, "🔊 نطق بالصوت الاصطناعي: $extractedWord", android.widget.Toast.LENGTH_SHORT).show()
-                                audioPlayUrl = null
-                                audioOriginalUrl = url
-                                audioWord = extractedWord
-                                showMiniPlayer = true
-                            } else {
-                                inAppBrowserUrl = url
-                            }
+                        val extractedWord = extractGermanWord(resolvedUrl, text)
+                        if (extractedWord.isNotEmpty()) {
+                            android.widget.Toast.makeText(context, "🔊 نطق بالصوت الاصطناعي: $extractedWord", android.widget.Toast.LENGTH_SHORT).show()
+                            audioPlayUrl = null
+                            audioOriginalUrl = resolvedUrl
+                            audioWord = extractedWord
+                            showMiniPlayer = true
                         } else {
-                            android.widget.Toast.makeText(context, "🔗 فتح الرابط: $url", android.widget.Toast.LENGTH_SHORT).show()
-                            inAppBrowserUrl = url
+                            android.widget.Toast.makeText(context, "🔗 فتح الرابط: $resolvedUrl", android.widget.Toast.LENGTH_SHORT).show()
+                            inAppBrowserUrl = resolvedUrl
                         }
                     }
                 },
@@ -2739,6 +2734,27 @@ fun AutoSizeText(
     )
 }
 
+fun resolveAbsoluteUrl(url: String): String {
+    val trimmed = url.trim()
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("file://") || trimmed.startsWith("content://")) {
+        return trimmed
+    }
+    // If it's a protocol-relative URL (starts with //)
+    if (trimmed.startsWith("//")) {
+        return "https:$trimmed"
+    }
+    // If it's relative, default to arabdict base URL
+    val cleanPath = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
+    return "https://www.arabdict.com$cleanPath"
+}
+
+fun cleanGermanWord(word: String): String {
+    // Keep only German characters, spaces, and hyphens
+    val cleaned = word.replace(Regex("[^a-zA-ZäöüÄÖÜß\\s\\-]"), " ")
+    // Replace multiple spaces with a single space
+    return cleaned.replace(Regex("\\s+"), " ").trim()
+}
+
 fun isDirectAudioUrl(url: String): Boolean {
     val cleanUrl = url.lowercase()
     return cleanUrl.endsWith(".mp3") || 
@@ -2780,8 +2796,7 @@ fun extractGermanWord(url: String, text: String): String {
         cleanText != "Nutzungsbedingungen" && 
         cleanText != "Datenschutz"
     ) {
-        // Strip out common non-word characters/symbols
-        val stripped = cleanText.replace(Regex("[🔊🎧▶️➔➔✔]"), "").trim()
+        val stripped = cleanGermanWord(cleanText)
         if (stripped.length >= 2) {
             return stripped
         }
@@ -2789,7 +2804,6 @@ fun extractGermanWord(url: String, text: String): String {
 
     // 2. Try extracting from URL query parameters
     try {
-        val decodedUrl = java.net.URLDecoder.decode(url, "UTF-8")
         val uri = android.net.Uri.parse(url)
         for (param in listOf("q", "text", "word", "query", "string", "term", "s", "id")) {
             var v = uri.getQueryParameter(param)
@@ -2797,8 +2811,9 @@ fun extractGermanWord(url: String, text: String): String {
                 if (param == "id" && (v.startsWith("de_") || v.startsWith("de-"))) {
                     v = v.substring(3)
                 }
-                if (v.trim().length in 2..45 && !v.contains("/") && !v.matches(Regex("^[0-9]+$"))) {
-                    return v.trim()
+                val stripped = cleanGermanWord(v)
+                if (stripped.length in 2..45 && !v.contains("/") && !v.matches(Regex("^[0-9]+$"))) {
+                    return stripped
                 }
             }
         }
@@ -2817,8 +2832,9 @@ fun extractGermanWord(url: String, text: String): String {
                     !segment.contains("=")
                 ) {
                     val decodedSegment = java.net.URLDecoder.decode(segment, "UTF-8").trim()
-                    if (decodedSegment.length in 2..45 && !decodedSegment.matches(Regex("^[0-9]+$"))) {
-                        return decodedSegment
+                    val stripped = cleanGermanWord(decodedSegment)
+                    if (stripped.length in 2..45 && !decodedSegment.matches(Regex("^[0-9]+$"))) {
+                        return stripped
                     }
                 }
             }
@@ -3855,9 +3871,6 @@ private fun applyPdfTheme(webView: WebView?, theme: String) {
 private fun injectPdfBridge(webView: WebView?) {
     val js = """
         (function() {
-            if (window.hasPdfBridgeInjected) return;
-            window.hasPdfBridgeInjected = true;
-
             function getAndroidBridge() {
                 if (typeof window !== 'undefined' && window.AndroidBridge) {
                     return window.AndroidBridge;
@@ -4000,7 +4013,10 @@ private fun injectPdfBridge(webView: WebView?) {
             function registerEvents() {
                 try {
                     if (window.PDFViewerApplication && window.PDFViewerApplication.eventBus) {
-                        const registerBusEvents = (bus) => {
+                        const bus = window.PDFViewerApplication.eventBus;
+                        if (!bus.hasEventBridgeRegistered) {
+                            bus.hasEventBridgeRegistered = true;
+                            
                             bus.on('pagechanging', (e) => {
                                 let total = 0;
                                 if (window.PDFViewerApplication.pdfDocument) {
@@ -4061,9 +4077,7 @@ private fun injectPdfBridge(webView: WebView?) {
                                     }
                                 } catch (err) {}
                             });
-                        };
-
-                        registerBusEvents(window.PDFViewerApplication.eventBus);
+                        }
                     } else {
                         setTimeout(registerEvents, 100);
                     }
@@ -4205,11 +4219,34 @@ private fun injectPdfBridge(webView: WebView?) {
                 }
             }
 
-            poll();
-            registerEvents();
-            setupScrollListener();
-            setupLinkInterceptor();
+            // Global once-only initialization
+            if (!window.hasPdfBridgeInjected) {
+                window.hasPdfBridgeInjected = true;
+                
+                // 1. Setup global window.open override
+                window.open = function(url, target, features) {
+                    console.log("window.open intercepted: " + url);
+                    let b = getAndroidBridge();
+                    if (b && typeof b.onLinkClicked === 'function') {
+                        b.onLinkClicked(url, "");
+                        return { close: function() {} };
+                    }
+                    return null;
+                };
+
+                // 2. Setup global click event listener (link interceptor)
+                setupLinkInterceptor();
+
+                // 3. Setup global scroll listener
+                setupScrollListener();
+
+                // 4. Start polling
+                poll();
+            }
+
+            // Dynamic updates/overrides (runs every time document changes or updates, internally guarded)
             setupLinkServiceOverride();
+            registerEvents();
         })();
     """.trimIndent()
 
