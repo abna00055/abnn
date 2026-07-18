@@ -4159,10 +4159,10 @@ private fun injectPdfBridge(webView: WebView?) {
                                 text = clickedLinkNode.textContent || clickedLinkNode.innerText || "";
                             }
                             if (href && href.trim().length > 0 && !href.startsWith('#') && !href.startsWith('javascript:')) {
-                                e.preventDefault();
-                                e.stopPropagation();
                                 var b = getAndroidBridge();
                                 if (b && typeof b.onLinkClicked === 'function') {
+                                    e.preventDefault();
+                                    e.stopPropagation();
                                     b.onLinkClicked(href, text.trim());
                                     return;
                                 }
@@ -4190,11 +4190,11 @@ private fun injectPdfBridge(webView: WebView?) {
                                             originalAddLinkAttributes.apply(this, arguments);
                                             if (link && url) {
                                                 link.addEventListener('click', (e) => {
-                                                    e.preventDefault();
-                                                    e.stopPropagation();
-                                                    let text = link.innerText || link.textContent || "";
                                                     let b = getAndroidBridge();
                                                     if (b && typeof b.onLinkClicked === 'function') {
+                                                        e.preventDefault();
+                                                        e.stopPropagation();
+                                                        let text = link.innerText || link.textContent || "";
                                                         b.onLinkClicked(url, text.trim());
                                                     }
                                                 }, true);
