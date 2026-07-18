@@ -1241,7 +1241,8 @@ class AndroidBridge(
     private val onPageChanged: (page: Int, total: Int) -> Unit,
     private val onSearchMatchesCount: (current: Int, total: Int) -> Unit,
     private val onSearchStateChanged: (state: Int, previous: Boolean) -> Unit,
-    private val onLinkClicked: (url: String) -> Unit
+    private val onLinkClicked: (url: String) -> Unit,
+    private val onDocumentLoaded: () -> Unit
 ) {
     private val handler = Handler(Looper.getMainLooper())
 
@@ -1274,6 +1275,14 @@ class AndroidBridge(
         android.util.Log.d("PDF_BRIDGE", "onLinkClicked called: url=$url")
         handler.post {
             onLinkClicked(url)
+        }
+    }
+
+    @JavascriptInterface
+    fun onDocumentLoaded() {
+        android.util.Log.d("PDF_BRIDGE", "onDocumentLoaded called")
+        handler.post {
+            onDocumentLoaded()
         }
     }
 }
@@ -3158,6 +3167,7 @@ fun PdfWebView(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    var isPdfLoading by remember { mutableStateOf(true) }
 
     val assetLoader = remember {
         val pdfCacheDir = File(context.filesDir, "pdf_cache").apply {
@@ -3177,102 +3187,154 @@ fun PdfWebView(
 
     val url = "https://appassets.androidplatform.net/pdfjs/web/viewer.html?file=https://appassets.androidplatform.net/cache/$cacheFileName"
 
-    AndroidView(
-        factory = { ctx ->
-            WebView(ctx).apply {
-                state.webView = this
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    state.webView = this
 
-                // Explicitly force hardware acceleration for incredibly smooth GPU-backed rendering and scrolling
-                setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+                    // Explicitly force hardware acceleration for incredibly smooth GPU-backed rendering and scrolling
+                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
 
-                // Clear cache on startup to ensure updated styles are loaded immediately
-                clearCache(true)
+                    // Clear cache on startup to ensure updated styles are loaded immediately
+                    clearCache(true)
 
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
 
-                settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    allowFileAccess = true
-                    allowContentAccess = true
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        allowFileAccess = true
+                        allowContentAccess = true
+                        allowFileAccessFromFileURLs = true
+                        allowUniversalAccessFromFileURLs = true
+                        mediaPlaybackRequiresUserGesture = false
+                        mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    }
+
+                    addJavascriptInterface(
+                        AndroidBridge(
+                            onPageChanged = { page, total ->
+                                isPdfLoading = false
+                                onPageChanged(page, total)
+                            },
+                            onSearchMatchesCount = onSearchMatchesCount,
+                            onSearchStateChanged = onSearchStateChanged,
+                            onLinkClicked = onLinkClicked,
+                            onDocumentLoaded = {
+                                isPdfLoading = false
+                            }
+                        ),
+                        "AndroidBridge"
+                    )
+
+                    webChromeClient = object : android.webkit.WebChromeClient() {
+                        override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                            android.util.Log.d("PDF_JS_CONSOLE", "${consoleMessage?.message()} -- From line ${consoleMessage?.lineNumber()} of ${consoleMessage?.sourceId()}")
+                            return true
+                        }
+                    }
+
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldInterceptRequest(
+                            view: WebView,
+                            request: WebResourceRequest
+                        ): WebResourceResponse? {
+                            return assetLoader.shouldInterceptRequest(request.url)
+                        }
+
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?,
+                            request: WebResourceRequest?
+                        ): Boolean {
+                            val url = request?.url?.toString() ?: return false
+                            if (url.startsWith("http://") || url.startsWith("https://")) {
+                                onLinkClicked(url)
+                                return true
+                            }
+                            return false
+                        }
+
+                        @Deprecated("Deprecated in Java")
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?,
+                            url: String?
+                        ): Boolean {
+                            if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                                onLinkClicked(url)
+                                return true
+                            }
+                            return false
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            applyPdfTheme(view, readingTheme)
+                            injectPdfBridge(view)
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            error: WebResourceError
+                        ) {
+                            super.onReceivedError(view, request, error)
+                            isPdfLoading = false
+                        }
+                    }
+
+                    loadUrl(url)
                 }
+            },
+            update = { webView ->
+                applyPdfTheme(webView, readingTheme)
+                injectPdfBridge(webView)
+            },
+            modifier = Modifier.fillMaxSize()
+        )
 
-                addJavascriptInterface(
-                    AndroidBridge(
-                        onPageChanged = onPageChanged,
-                        onSearchMatchesCount = onSearchMatchesCount,
-                        onSearchStateChanged = onSearchStateChanged,
-                        onLinkClicked = onLinkClicked
+        if (isPdfLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        when (readingTheme) {
+                            "dark" -> Color(0xFF1E1F22)
+                            "black" -> Color(0xFF000000)
+                            "sepia" -> Color(0xFFF4ECD8)
+                            else -> Color(0xFFF4F4F4)
+                        }
                     ),
-                    "AndroidBridge"
-                )
-
-                webChromeClient = object : android.webkit.WebChromeClient() {
-                    override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
-                        android.util.Log.d("PDF_JS_CONSOLE", "${consoleMessage?.message()} -- From line ${consoleMessage?.lineNumber()} of ${consoleMessage?.sourceId()}")
-                        return true
-                    }
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 3.dp
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "جاري تحميل وتهيئة المستند...",
+                        color = when (readingTheme) {
+                            "dark", "black" -> Color.White.copy(alpha = 0.8f)
+                            else -> Color.Black.copy(alpha = 0.8f)
+                        },
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
-
-                webViewClient = object : WebViewClient() {
-                    override fun shouldInterceptRequest(
-                        view: WebView,
-                        request: WebResourceRequest
-                    ): WebResourceResponse? {
-                        return assetLoader.shouldInterceptRequest(request.url)
-                    }
-
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView?,
-                        request: WebResourceRequest?
-                    ): Boolean {
-                        val url = request?.url?.toString() ?: return false
-                        if (url.startsWith("http://") || url.startsWith("https://")) {
-                            onLinkClicked(url)
-                            return true
-                        }
-                        return false
-                    }
-
-                    @Deprecated("Deprecated in Java")
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView?,
-                        url: String?
-                    ): Boolean {
-                        if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
-                            onLinkClicked(url)
-                            return true
-                        }
-                        return false
-                    }
-
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        applyPdfTheme(view, readingTheme)
-                        injectPdfBridge(view)
-                    }
-
-                    override fun onReceivedError(
-                        view: WebView,
-                        request: WebResourceRequest,
-                        error: WebResourceError
-                    ) {
-                        super.onReceivedError(view, request, error)
-                    }
-                }
-
-                loadUrl(url)
             }
-        },
-        update = { webView ->
-            applyPdfTheme(webView, readingTheme)
-            injectPdfBridge(webView)
-        },
-        modifier = modifier
-    )
+        }
+    }
 }
 
 private fun applyPdfTheme(webView: WebView?, theme: String) {
@@ -3337,8 +3399,62 @@ private fun applyPdfTheme(webView: WebView?, theme: String) {
 private fun injectPdfBridge(webView: WebView?) {
     val js = """
         (function() {
+            // Idempotent guard
             if (window.hasPdfBridgeInjected) return;
             window.hasPdfBridgeInjected = true;
+
+            console.log("PDF_JS_CONSOLE: Injecting robust PDF bridge...");
+
+            // 1. Override window.open globally and idempotently to intercept links from pdf.js link service
+            if (!window.originalWindowOpen) {
+                window.originalWindowOpen = window.open;
+                window.open = function(url, target, features) {
+                    console.log("PDF_JS_CONSOLE: window.open intercepted URL: " + url);
+                    if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+                        if (window.AndroidBridge && typeof window.AndroidBridge.onLinkClicked === 'function') {
+                            window.AndroidBridge.onLinkClicked(url);
+                            return null;
+                        }
+                    }
+                    if (window.originalWindowOpen) {
+                        try {
+                            return window.originalWindowOpen.apply(this, arguments);
+                        } catch (e) {
+                            console.error("PDF_JS_CONSOLE: window.open fallback error: " + e.message);
+                        }
+                    }
+                    return null;
+                };
+            }
+
+            // 2. Global capture-phase click listener to intercept direct clicks on anchor tags
+            if (!window.handlePdfBridgeClick) {
+                window.handlePdfBridgeClick = function(e) {
+                    const target = e.target.closest('a');
+                    if (target) {
+                        let href = target.href;
+                        // Handle SVG Animated String href or other object-type hrefs safely
+                        if (href && typeof href === 'object' && href.baseVal !== undefined) {
+                            href = href.baseVal;
+                        }
+                        
+                        if (href && typeof href === 'string') {
+                            const cleanHref = href.trim();
+                            if (cleanHref.startsWith('http://') || cleanHref.startsWith('https://')) {
+                                console.log("PDF_JS_CONSOLE: Click intercepted URL: " + cleanHref);
+                                if (window.AndroidBridge && typeof window.AndroidBridge.onLinkClicked === 'function') {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    window.AndroidBridge.onLinkClicked(cleanHref);
+                                } else {
+                                    console.error("PDF_JS_CONSOLE: AndroidBridge.onLinkClicked is not defined!");
+                                }
+                            }
+                        }
+                    }
+                };
+                document.addEventListener('click', window.handlePdfBridgeClick, true);
+            }
 
             let lastReportedPage = -1;
             let lastReportedTotal = -1;
@@ -3396,6 +3512,14 @@ private fun injectPdfBridge(webView: WebView?) {
                     setTimeout(poll, 250);
                     return;
                 }
+
+                // Force LinkTarget.BLANK (2) so PDFLinkService always uses window.open / _blank
+                try {
+                    if (window.PDFViewerApplication.pdfLinkService && window.PDFViewerApplication.pdfLinkService.externalLinkTarget !== 2) {
+                        window.PDFViewerApplication.pdfLinkService.externalLinkTarget = 2;
+                        console.log("PDF_JS_CONSOLE: Configured externalLinkTarget to BLANK.");
+                    }
+                } catch (e) {}
 
                 // 1. Poll Page and Total Pages
                 try {
@@ -3508,6 +3632,11 @@ private fun injectPdfBridge(webView: WebView?) {
                                 let page = (window.PDFViewerApplication.pdfViewer && window.PDFViewerApplication.pdfViewer.currentPageNumber) || 1;
                                 let total = e.pagesCount || (window.PDFViewerApplication.pdfDocument && window.PDFViewerApplication.pdfDocument.numPages) || 1;
                                 reportPage(page, total);
+                                try {
+                                    if (window.AndroidBridge && typeof window.AndroidBridge.onDocumentLoaded === 'function') {
+                                        window.AndroidBridge.onDocumentLoaded();
+                                    }
+                                } catch (err) {}
                             });
 
                             bus.on('updatefindmatchescount', (e) => {
@@ -3540,20 +3669,6 @@ private fun injectPdfBridge(webView: WebView?) {
                     console.error("PDF_JS_INIT_ERROR: " + e.message);
                 }
             }
-
-            document.addEventListener('click', function(e) {
-                const target = e.target.closest('a');
-                if (target && target.href) {
-                    const href = target.href;
-                    if (href.startsWith('http://') || href.startsWith('https://')) {
-                        if (window.AndroidBridge && typeof window.AndroidBridge.onLinkClicked === 'function') {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            window.AndroidBridge.onLinkClicked(href);
-                        }
-                    }
-                }
-            }, true);
 
             poll();
             registerEvents();
@@ -3811,6 +3926,8 @@ fun EmbeddedBrowserSheet(
                             domStorageEnabled = true
                             allowFileAccess = true
                             allowContentAccess = true
+                            mediaPlaybackRequiresUserGesture = false
+                            mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         }
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
