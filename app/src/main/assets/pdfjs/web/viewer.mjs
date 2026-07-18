@@ -1058,6 +1058,19 @@ class PDFLinkService {
       rel = this.externalLinkRel;
     if (this.externalLinkEnabled) {
       link.href = link.title = url;
+      link.onclick = (e) => {
+        try {
+          if (typeof window !== 'undefined' && window.AndroidBridge && typeof window.AndroidBridge.onLinkClicked === 'function') {
+            e.preventDefault();
+            e.stopPropagation();
+            let text = link.innerText || link.textContent || "";
+            window.AndroidBridge.onLinkClicked(url, text.trim());
+            return false;
+          }
+        } catch (err) {
+          console.error("AndroidBridge error in click: " + err);
+        }
+      };
     } else {
       link.href = "";
       link.title = `Disabled: ${url}`;

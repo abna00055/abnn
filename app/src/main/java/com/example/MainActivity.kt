@@ -4134,7 +4134,7 @@ private fun injectPdfBridge(webView: WebView?) {
                         var isLink = false;
                         var clickedLinkNode = null;
                         while (target) {
-                            if (target.tagName === 'A' && target.getAttribute('href')) {
+                            if (target.tagName && target.tagName.toUpperCase() === 'A' && target.getAttribute('href')) {
                                 isLink = true;
                                 clickedLinkNode = target;
                                 break;
@@ -4176,40 +4176,45 @@ private fun injectPdfBridge(webView: WebView?) {
 
             function setupLinkServiceOverride() {
                 try {
-                    if (window.PDFViewerApplication && window.PDFViewerApplication.linkService) {
-                        let linkService = window.PDFViewerApplication.linkService;
-                        if (!linkService.hasLinkOverride) {
-                            linkService.hasLinkOverride = true;
-                            
-                            let originalAddLinkAttributes = linkService.addLinkAttributes;
-                            if (originalAddLinkAttributes) {
-                                linkService.addLinkAttributes = function(link, url, newWindow) {
-                                    try {
-                                        originalAddLinkAttributes.apply(this, arguments);
-                                        if (link && url) {
-                                            link.addEventListener('click', (e) => {
-                                                e.preventDefault();
-                                                e.stopPropagation();
-                                                let text = link.innerText || link.textContent || "";
-                                                let b = getAndroidBridge();
-                                                if (b && typeof b.onLinkClicked === 'function') {
-                                                    b.onLinkClicked(url, text.trim());
-                                                }
-                                            }, true);
+                    let app = window.PDFViewerApplication;
+                    if (app) {
+                        let linkService = app.pdfLinkService || app.linkService;
+                        if (linkService) {
+                            if (!linkService.hasLinkOverride) {
+                                linkService.hasLinkOverride = true;
+                                
+                                let originalAddLinkAttributes = linkService.addLinkAttributes;
+                                if (originalAddLinkAttributes) {
+                                    linkService.addLinkAttributes = function(link, url, newWindow) {
+                                        try {
+                                            originalAddLinkAttributes.apply(this, arguments);
+                                            if (link && url) {
+                                                link.addEventListener('click', (e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    let text = link.innerText || link.textContent || "";
+                                                    let b = getAndroidBridge();
+                                                    if (b && typeof b.onLinkClicked === 'function') {
+                                                        b.onLinkClicked(url, text.trim());
+                                                    }
+                                                }, true);
+                                            }
+                                        } catch (err) {
+                                            console.error("Error in overridden addLinkAttributes: " + err.message);
                                         }
-                                    } catch (err) {
-                                        console.error("Error in overridden addLinkAttributes: " + err.message);
+                                    };
+                                }
+
+                                linkService.openExternalLink = function(url) {
+                                    console.log("PDFJS intercepted openExternalLink: " + url);
+                                    let b = getAndroidBridge();
+                                    if (b && typeof b.onLinkClicked === 'function') {
+                                        b.onLinkClicked(url, "");
                                     }
                                 };
                             }
-
-                            linkService.openExternalLink = function(url) {
-                                console.log("PDFJS intercepted openExternalLink: " + url);
-                                let b = getAndroidBridge();
-                                if (b && typeof b.onLinkClicked === 'function') {
-                                    b.onLinkClicked(url, "");
-                                }
-                            };
+                        } else {
+                            setTimeout(setupLinkServiceOverride, 200);
                         }
                     } else {
                         setTimeout(setupLinkServiceOverride, 200);
